@@ -1625,7 +1625,7 @@ class ServerArgs:
     # -------------------------------------------------------------------------
     speculative_algorithm: A[
         Optional[str],
-        "Speculative algorithm. Builtins: EAGLE, EAGLE3, NEXTN, STANDALONE, NGRAM, DFLASH. Or any name registered via `SpeculativeAlgorithm.register`.",
+        "Speculative algorithm. Builtins: EAGLE, EAGLE3, NEXTN, STANDALONE, NGRAM, DFLASH, PEAGLE, PEAGLE_DSL. Or any name registered via `SpeculativeAlgorithm.register`.",
     ] = None
     speculative_draft_model_path: A[
         Optional[str],
@@ -1764,6 +1764,11 @@ class ServerArgs:
         Optional[str],
         "Directory to write decoupled speculative decoding trace files.",
     ] = None
+    peagle_dsl_threshold: A[
+        float,
+        "P-EAGLE DSL: confidence threshold for sync-free early exit "
+        "(used when --speculative-algorithm PEAGLE_DSL).",
+    ] = 2.0
 
     # Speculative decoding (ngram)
     # -------------------------------------------------------------------------
