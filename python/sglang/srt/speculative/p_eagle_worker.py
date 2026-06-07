@@ -136,8 +136,11 @@ def _draft_sample_with_dsl_kernel(
         # Greedy sample: argmax from pass 1
         token = argmax
 
-        # Log-probability via numerically-stable log-sum-exp over full vocab
-        # (needed for rejection sampling in the verify step)
+        # Log-probability of the sampled token via numerically-stable
+        # log-sum-exp over the full vocab (needed for rejection sampling in
+        # the verify step). token == argmax, and max1 was already pinned to
+        # logits[argmax] in pass 1, so log_prob = max1 - log_sum_exp without
+        # re-loading token_logit from global memory.
         sum_exp = 0.0
         for v_start in range(0, vocab_size, BLOCK_V):
             v_offs = v_start + tl.arange(0, BLOCK_V)
@@ -145,8 +148,7 @@ def _draft_sample_with_dsl_kernel(
             logits_block = tl.load(base_ptr + v_offs, mask=v_mask, other=-1e9)
             sum_exp += tl.sum(tl.exp(logits_block - max1), axis=0)
         log_sum_exp = tl.log(sum_exp) + max1
-        token_logit = tl.load(base_ptr + token)
-        log_prob = token_logit - log_sum_exp
+        log_prob = max1 - log_sum_exp
 
         tl.store(output_tokens_ptr + seq_id * K + k, token)
         tl.store(output_scores_ptr + seq_id * K + k, log_prob)
