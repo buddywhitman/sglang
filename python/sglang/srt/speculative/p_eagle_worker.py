@@ -95,8 +95,7 @@ def _draft_sample_with_dsl_kernel(
             # Already exited — write padding and clear continue state
             tl.store(output_tokens_ptr + seq_id * K + k, 0)
             tl.store(output_scores_ptr + seq_id * K + k, -1e9)
-            if k == K - 1:
-                tl.store(continue_buf_ptr + seq_id, False)
+            tl.store(continue_buf_ptr + seq_id, False)
             continue
 
         # Load logits for this sequence, position k
@@ -112,35 +111,39 @@ def _draft_sample_with_dsl_kernel(
             v_mask = v_offs < vocab_size
             logits_block = tl.load(base_ptr + v_offs, mask=v_mask, other=-1e9)
 
-            # Find top-1 and top-2 within this block
+            # Find block's top-1 and top-2
             block_max = tl.max(logits_block, axis=0)
-            block_argmax_local = tl.argmax(logits_block, axis=0)
-            block_argmax = block_argmax_local + v_start
+            block_argmax = tl.argmax(logits_block, axis=0) + v_start
 
-            # Find second-max within block (mask out the argmax position)
-            block_mask_out_max = (tl.arange(0, BLOCK_V) != block_argmax_local) & v_mask
-            block_second = tl.max(
-                tl.where(block_mask_out_max, logits_block, -1e9),
-                axis=0
+            # Find block's second-highest value by masking out the block argmax
+            block_logits_masked = tl.where(
+                tl.arange(0, BLOCK_V) == (block_argmax - v_start),
+                -1e9,
+                logits_block
             )
+            block_second = tl.max(block_logits_masked, axis=0)
 
-            # Update global max1, max2, argmax
+            # Update global max1/max2/argmax
             if block_max > max1:
                 # New global max found
-                if argmax >= v_start and argmax < v_start + BLOCK_V:
-                    # Old max was in this block, so we already have correct block_second
-                    max2 = tl.maximum(max1, block_second)
+                if block_argmax == argmax:
+                    # Same token, just update max1
+                    max1 = block_max
                 else:
-                    # Old max was in a different block
-                    max2 = max1
-                max1 = block_max
-                argmax = block_argmax
+                    # Different token: old max1 becomes candidate for max2
+                    if max1 > max2:
+                        max2 = max1
+                    max1 = block_max
+                    argmax = block_argmax
+                    # Block's second might also be a candidate for global max2
+                    if block_second > max2:
+                        max2 = block_second
             elif block_max > max2:
-                # Block max is not global max but could be global second
+                # Block max is not global max1, but could be max2
                 max2 = block_max
 
-            # Also check if block's second-best beats current max2
-            if block_second > max2 and block_argmax != argmax:
+            # Block's second value could also be max2
+            if block_second > max2 and block_second < max1:
                 max2 = block_second
 
         confidence = max1 - max2
@@ -152,23 +155,23 @@ def _draft_sample_with_dsl_kernel(
         # If low confidence, mark early exit for remaining positions
         if confidence < confidence_threshold:
             should_continue = False
-            # Clear continue state immediately when exiting early (not at last position)
-            if k < K - 1:
-                tl.store(continue_buf_ptr + seq_id, False)
+            tl.store(continue_buf_ptr + seq_id, False)
 
-        # Greedy sample: argmax from pass 1
+        # Greedy sample: argmax from reduction above
         token = argmax
 
         # Log-probability via numerically-stable log-sum-exp over full vocab
         # (needed for rejection sampling in the verify step)
+        # Accumulate sum_exp across all blocks using the global max1
         sum_exp = 0.0
         for v_start in range(0, vocab_size, BLOCK_V):
             v_offs = v_start + tl.arange(0, BLOCK_V)
             v_mask = v_offs < vocab_size
             logits_block = tl.load(base_ptr + v_offs, mask=v_mask, other=-1e9)
-            # Use max1 (global maximum) for stable log-sum-exp across all blocks
-            sum_exp += tl.sum(tl.where(v_mask, tl.exp(logits_block - max1), 0.0), axis=0)
-        log_sum_exp = tl.log(sum_exp) + max1
+            # Compute exp(logit - max1) for numerical stability, respecting mask
+            exp_block = tl.where(v_mask, tl.exp(logits_block - max1), 0.0)
+            sum_exp += tl.sum(exp_block, axis=0)
+        log_sum_exp = max1 + tl.log(sum_exp)
         token_logit = tl.load(base_ptr + token)
         log_prob = token_logit - log_sum_exp
 
@@ -387,6 +390,7 @@ class PEAGLEWorker(EAGLEWorker):
         Maps [batch, K, vocab] logits to the (parent_list, top_scores_index, draft_tokens)
         format expected by build_tree_kernel_efficient.
         """
+        batch_size = all_logits.shape[0]
         K = all_logits.shape[1]
 
         score_list = []
@@ -573,45 +577,45 @@ class PEAGLEDSLWorker(PEAGLEWorker):
         exited_sentinel = -1e8
 
         for i in range(K):
-            # Check if DSL outputs are available for this step
-            has_dsl_output = (draft_tokens is not None and
-                             draft_scores is not None and
-                             i < draft_tokens.shape[1])
+            step_logits = all_logits[:, i, :]  # [batch, vocab]
 
-            if has_dsl_output and i > 0:
-                # Use DSL draft tokens and scores directly instead of recomputing
-                # Create a topk_p and topk_index that represents the DSL choice
-                step_topk_p = torch.zeros(batch_size, self.topk, device=draft_tokens.device)
-                step_topk_index = torch.zeros(batch_size, self.topk, dtype=torch.long, device=draft_tokens.device)
+            # Use DSL-provided draft tokens and scores instead of recomputing
+            # Check if DSL produced valid outputs for this step
+            has_dsl_output = (draft_scores[:, i] > exited_sentinel).any()
 
-                # For sequences with valid DSL scores (not exited), use DSL token/score
-                valid_mask = draft_scores[:, i] > exited_sentinel
-                if valid_mask.any():
-                    # Set top-1 to DSL token with exp(log_prob) as probability
-                    step_topk_index[valid_mask, 0] = draft_tokens[valid_mask, i].long()
-                    step_topk_p[valid_mask, 0] = torch.exp(draft_scores[valid_mask, i])
-                    # Fill remaining topk slots with very low probability fallbacks
-                    for k_idx in range(1, self.topk):
-                        step_topk_index[valid_mask, k_idx] = (step_topk_index[valid_mask, 0] + k_idx) % all_logits.shape[-1]
-                        step_topk_p[valid_mask, k_idx] = 1e-9
+            if i == 0:
+                # First position: use topk_p/topk_index from spec_info (precomputed by target model)
+                step_topk_p, step_topk_index = topk_p, topk_index
+            elif has_dsl_output:
+                # DSL outputs available: use draft_tokens and draft_scores
+                # Convert DSL greedy tokens to topk format by placing them at position 0
+                # and filling remaining topk-1 positions from softmax
+                step_topk_index = torch.zeros(
+                    batch_size, self.topk, dtype=torch.long, device=step_logits.device
+                )
+                step_topk_p = torch.zeros(
+                    batch_size, self.topk, dtype=torch.float32, device=step_logits.device
+                )
 
-                # For exited sequences, use peaked distribution at DSL token
-                exited_mask = ~valid_mask
-                if exited_mask.any():
-                    step_topk_index[exited_mask, 0] = draft_tokens[exited_mask, i].long()
-                    step_topk_p[exited_mask, 0] = 0.99
-                    for k_idx in range(1, self.topk):
-                        step_topk_index[exited_mask, k_idx] = (step_topk_index[exited_mask, 0] + k_idx) % all_logits.shape[-1]
-                        step_topk_p[exited_mask, k_idx] = 0.01 / (self.topk - 1) if self.topk > 1 else 0.01
+                # Place DSL tokens at index 0 of topk
+                step_topk_index[:, 0] = draft_tokens[:, i].long()
+
+                # Compute probabilities for DSL tokens
+                probs = torch.softmax(step_logits, dim=-1)
+                dsl_token_probs = probs.gather(1, draft_tokens[:, i].long().unsqueeze(1)).squeeze(1)
+                step_topk_p[:, 0] = dsl_token_probs
+
+                # Fill remaining topk-1 positions with next-best tokens from softmax
+                if self.topk > 1:
+                    remaining_topk_p, remaining_topk_index = fast_topk(probs, self.topk, dim=-1)
+                    # Copy positions 1..topk from fast_topk result
+                    # (position 0 is already filled with DSL token)
+                    step_topk_p[:, 1:] = remaining_topk_p[:, 1:]
+                    step_topk_index[:, 1:] = remaining_topk_index[:, 1:]
             else:
-                # No DSL output for this step, compute from logits as before
-                step_logits = all_logits[:, i, :]  # [batch, vocab]
-
-                if i == 0:
-                    step_topk_p, step_topk_index = topk_p, topk_index
-                else:
-                    probs = torch.softmax(step_logits, dim=-1)
-                    step_topk_p, step_topk_index = fast_topk(probs, self.topk, dim=-1)
+                # No DSL output: fall back to computing topk from logits
+                probs = torch.softmax(step_logits, dim=-1)
+                step_topk_p, step_topk_index = fast_topk(probs, self.topk, dim=-1)
 
             if self.hot_token_id is not None:
                 step_topk_index = self.hot_token_id[step_topk_index]

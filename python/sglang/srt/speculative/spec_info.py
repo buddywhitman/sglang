@@ -197,8 +197,8 @@ class SpeculativeAlgorithm(Enum):
 
             return FrozenKVMTPWorker
 
+        # Check PEAGLE before generic EAGLE since is_eagle() returns True for PEAGLE variants
         if self.is_peagle():
-            # Check PEAGLE first since is_eagle() also returns True for PEAGLE variants
             if self == SpeculativeAlgorithm.PEAGLE_DSL:
                 from sglang.srt.speculative.p_eagle_worker import PEAGLEDSLWorker
 
@@ -208,7 +208,7 @@ class SpeculativeAlgorithm(Enum):
 
                 return PEAGLEWorker
 
-        elif self.is_eagle() and server_args.enable_multi_layer_eagle:
+        if self.is_eagle() and server_args.enable_multi_layer_eagle:
             # FIXME: migrate to EagleWorker
             if enable_overlap:
                 from sglang.srt.speculative.multi_layer_eagle_worker_v2 import (

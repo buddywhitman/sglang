@@ -5908,12 +5908,6 @@ class ServerArgs:
             default=ServerArgs.speculative_draft_model_quantization,
             help="The quantization method for speculative model.",
         )
-        parser.add_argument(
-            "--peagle-dsl-threshold",
-            type=float,
-            default=ServerArgs.peagle_dsl_threshold,
-            help="P-EAGLE DSL confidence threshold for sync-free early exit (used with --speculative-algorithm PEAGLE_DSL)",
-        )
 
         # Speculative decoding (ngram)
         parser.add_argument(
@@ -5983,6 +5977,12 @@ class ServerArgs:
             default=ServerArgs.speculative_skip_dp_mlp_sync,
             help="Skip the extra MLP sync that the scheduler performs before merging a new batch "
             "when speculative decoding + DP attention are both enabled.",
+        )
+        parser.add_argument(
+            "--peagle-dsl-threshold",
+            type=float,
+            default=ServerArgs.peagle_dsl_threshold,
+            help="P-EAGLE DSL confidence threshold for sync-free early exit (used with --speculative-algorithm PEAGLE_DSL)",
         )
 
         # Multi-layer Eagle speculative decoding

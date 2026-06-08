@@ -285,17 +285,17 @@ def test_fused_kernel_no_item_call(monkeypatch):
 
     monkeypatch.setattr(torch.Tensor, "item", _no_item)
 
-    # Create inputs for DSL kernel
-    all_logits = torch.randn(batch_size, K, vocab_size, dtype=torch.float32, device=device)
+    # Create test inputs for DSL kernel
+    logits = torch.randn(batch_size, K, vocab_size, dtype=torch.float32, device=device)
     output_tokens = torch.empty(batch_size, K, dtype=torch.int32, device=device)
     output_scores = torch.empty(batch_size, K, dtype=torch.float32, device=device)
     continue_buf = torch.ones(batch_size, dtype=torch.bool, device=device)
 
     BLOCK_V = min(triton.next_power_of_2(vocab_size), 4096)
 
-    # Should not raise - DSL kernel must not call .item()
+    # Should not raise
     _draft_sample_with_dsl_kernel[(batch_size,)](
-        all_logits.contiguous(),
+        logits.contiguous(),
         output_tokens,
         output_scores,
         continue_buf,
@@ -305,6 +305,5 @@ def test_fused_kernel_no_item_call(monkeypatch):
         K=K,
         BLOCK_V=BLOCK_V,
     )
-
     assert output_tokens.shape == (batch_size, K)
     assert output_scores.shape == (batch_size, K)
