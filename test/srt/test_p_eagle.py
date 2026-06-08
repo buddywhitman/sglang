@@ -266,42 +266,45 @@ def test_positions_gt0_are_shared():
 @pytest.mark.skipif(not _is_cuda_available(), reason="CUDA required")
 def test_fused_kernel_no_item_call(monkeypatch):
     """
-    fused_parallel_draft_input must not call .item() (which causes CPU-GPU sync).
+    DSL kernel must not call .item() (which causes CPU-GPU sync).
 
-    Strategy: patch torch.Tensor.item to raise, then run the kernel.
+    Strategy: patch torch.Tensor.item to raise, then run the DSL kernel.
     The test passes if no exception is raised (no .item() call).
     """
-    from sglang.srt.speculative.triton_ops.fused_draft_input import (
-        fused_parallel_draft_input,
-    )
+    from sglang.srt.speculative.p_eagle_worker import _draft_sample_with_dsl_kernel
+    import triton
 
     device = torch.device("cuda")
-    batch_size, K, hidden_dim, vocab_size = 4, 3, 512, 256
-
-    original_item = torch.Tensor.item
+    batch_size, K, vocab_size = 4, 3, 256
 
     def _no_item(self):
         raise AssertionError(
-            "fused_parallel_draft_input called .item() — this causes CPU-GPU sync "
+            "DSL kernel called .item() — this causes CPU-GPU sync "
             "and violates the sync-free DSL contract."
         )
 
     monkeypatch.setattr(torch.Tensor, "item", _no_item)
 
-    h_fused = torch.randn(batch_size, hidden_dim, dtype=torch.float16, device=device)
-    embed_table = torch.randn(
-        vocab_size, hidden_dim, dtype=torch.float16, device=device
-    )
-    last_tokens = torch.zeros(batch_size, dtype=torch.int64, device=device)
-    h_shared = h_fused.mean(0)
+    # Create inputs for DSL kernel
+    all_logits = torch.randn(batch_size, K, vocab_size, dtype=torch.float32, device=device)
+    output_tokens = torch.empty(batch_size, K, dtype=torch.int32, device=device)
+    output_scores = torch.empty(batch_size, K, dtype=torch.float32, device=device)
+    continue_buf = torch.ones(batch_size, dtype=torch.bool, device=device)
 
-    # Should not raise
-    out = fused_parallel_draft_input(
-        h_fused=h_fused,
-        embed_table=embed_table,
-        last_tokens=last_tokens,
-        h_shared=h_shared,
-        mask_token_id=2,
+    BLOCK_V = min(triton.next_power_of_2(vocab_size), 4096)
+
+    # Should not raise - DSL kernel must not call .item()
+    _draft_sample_with_dsl_kernel[(batch_size,)](
+        all_logits.contiguous(),
+        output_tokens,
+        output_scores,
+        continue_buf,
+        temperature=0.0,
+        confidence_threshold=2.0,
+        vocab_size=vocab_size,
         K=K,
+        BLOCK_V=BLOCK_V,
     )
-    assert out.shape == (batch_size * K, hidden_dim)
+
+    assert output_tokens.shape == (batch_size, K)
+    assert output_scores.shape == (batch_size, K)

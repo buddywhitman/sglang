@@ -5908,6 +5908,12 @@ class ServerArgs:
             default=ServerArgs.speculative_draft_model_quantization,
             help="The quantization method for speculative model.",
         )
+        parser.add_argument(
+            "--peagle-dsl-threshold",
+            type=float,
+            default=ServerArgs.peagle_dsl_threshold,
+            help="P-EAGLE DSL confidence threshold for sync-free early exit (used with --speculative-algorithm PEAGLE_DSL)",
+        )
 
         # Speculative decoding (ngram)
         parser.add_argument(

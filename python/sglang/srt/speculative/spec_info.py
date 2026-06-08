@@ -197,7 +197,18 @@ class SpeculativeAlgorithm(Enum):
 
             return FrozenKVMTPWorker
 
-        if self.is_eagle() and server_args.enable_multi_layer_eagle:
+        if self.is_peagle():
+            # Check PEAGLE first since is_eagle() also returns True for PEAGLE variants
+            if self == SpeculativeAlgorithm.PEAGLE_DSL:
+                from sglang.srt.speculative.p_eagle_worker import PEAGLEDSLWorker
+
+                return PEAGLEDSLWorker
+            else:
+                from sglang.srt.speculative.p_eagle_worker import PEAGLEWorker
+
+                return PEAGLEWorker
+
+        elif self.is_eagle() and server_args.enable_multi_layer_eagle:
             # FIXME: migrate to EagleWorker
             if enable_overlap:
                 from sglang.srt.speculative.multi_layer_eagle_worker_v2 import (
@@ -241,16 +252,6 @@ class SpeculativeAlgorithm(Enum):
             from sglang.srt.speculative.ngram_worker import NGRAMWorker
 
             return NGRAMWorker
-
-        elif self.is_peagle():
-            if self == SpeculativeAlgorithm.PEAGLE_DSL:
-                from sglang.srt.speculative.p_eagle_worker import PEAGLEDSLWorker
-
-                return PEAGLEDSLWorker
-            else:
-                from sglang.srt.speculative.p_eagle_worker import PEAGLEWorker
-
-                return PEAGLEWorker
 
         raise ValueError("Unreachable code path in create_worker.")
 
