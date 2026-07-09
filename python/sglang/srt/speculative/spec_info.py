@@ -106,7 +106,11 @@ class SpeculativeAlgorithm(Enum):
         )
 
     def is_eagle3(self) -> bool:
-        return self == SpeculativeAlgorithm.EAGLE3
+        # PEAGLE/PEAGLE_DSL reuse EAGLE-3's draft-head infrastructure
+        # (tri-layer hidden fusion, lm-head sharing behavior, hidden-state
+        # capture mode) -- they are not a separate draft architecture, just
+        # a different (parallel) drafting loop on top of it.
+        return self in (SpeculativeAlgorithm.EAGLE3, SpeculativeAlgorithm.PEAGLE, SpeculativeAlgorithm.PEAGLE_DSL)
 
     def is_peagle(self) -> bool:
         return self in (SpeculativeAlgorithm.PEAGLE, SpeculativeAlgorithm.PEAGLE_DSL)

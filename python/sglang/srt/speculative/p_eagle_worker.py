@@ -277,7 +277,14 @@ class PEAGLEDraftWorker(EagleDraftWorker):
         orig_positions = forward_batch.positions
         orig_hidden_states = spec_info.hidden_states
 
-        forward_batch.input_ids = orig_input_ids.repeat_interleave(K, dim=0)
+        # input_ids is not read anywhere in the base sequential loop before
+        # it overwrites it fresh each step (eagle_worker_v2.py:671) -- the
+        # framework tolerates it being None on entry to draft_forward, since
+        # hidden_states (replaced with parallel_inputs below) carries the
+        # real per-position input, not input_ids. Mirror that tolerance
+        # instead of assuming a tensor is always present.
+        if orig_input_ids is not None:
+            forward_batch.input_ids = orig_input_ids.repeat_interleave(K, dim=0)
         forward_batch.req_pool_indices = orig_req_pool_indices.repeat_interleave(
             K, dim=0
         )
