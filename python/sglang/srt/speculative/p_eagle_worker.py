@@ -353,6 +353,13 @@ class PEAGLEDraftWorker(EagleDraftWorker):
             forward_batch.forward_metadata_replan_equivalent = (
                 orig_metadata_replan_equivalent
             )
+            # init_forward_metadata may configure attention-backend-internal
+            # state (workspace buffers, plan objects) beyond what
+            # forward_batch's own bookkeeping fields track. Re-plan back to
+            # the original (restored) shape so no state sized for the
+            # K-expanded batch lingers for whatever runs next (verify()).
+            if orig_metadata_ready:
+                self.draft_attn_backend.init_forward_metadata(forward_batch)
 
         all_logits = logits_output.next_token_logits.view(batch_size, K, -1)
 
