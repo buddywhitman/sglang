@@ -104,66 +104,68 @@ def _draft_sample_with_confidence_kernel(
     token id 0 / score -1e9, so verification rejects them immediately
     instead of spending compute confirming a low-confidence guess.
     """
+    # Triton's AST-to-IR pass does not support `continue`/`break` inside a
+    # `for` loop -- structure this as "do the real work only if not already
+    # masked" instead of early-continuing out of masked iterations.
     seq_id = tl.program_id(0)
     masked = False
 
     for k in range(K):
+        if not masked:
+            base_ptr = logits_ptr + seq_id * K * vocab_size + k * vocab_size
+
+            # Pass 1: global max1 and its position (argmax)
+            max1 = -1e9
+            argmax = 0
+            for v_start in range(0, vocab_size, BLOCK_V):
+                v_offs = v_start + tl.arange(0, BLOCK_V)
+                v_mask = v_offs < vocab_size
+                logits_block = tl.load(base_ptr + v_offs, mask=v_mask, other=-1e9)
+                block_max = tl.max(logits_block, axis=0)
+                block_argmax = tl.argmax(logits_block, axis=0) + v_start
+                if block_max > max1:
+                    max1 = block_max
+                    argmax = block_argmax
+
+            # Pass 2: global max2, masking out the argmax position
+            # specifically (not just its block) so co-located top-1/top-2
+            # logits don't collapse to the same value.
+            max2 = -1e9
+            for v_start in range(0, vocab_size, BLOCK_V):
+                v_offs = v_start + tl.arange(0, BLOCK_V)
+                v_mask = (v_offs < vocab_size) & (v_offs != argmax)
+                logits_block = tl.load(base_ptr + v_offs, mask=v_mask, other=-1e9)
+                block_max = tl.max(logits_block, axis=0)
+                if block_max > max2:
+                    max2 = block_max
+
+            confidence = max1 - max2
+            if confidence < confidence_threshold:
+                masked = True
+            else:
+                token = argmax
+
+                # log_prob of the sampled token via numerically-stable
+                # log-sum-exp. token == argmax and max1 == logits[argmax]
+                # (pinned together in pass 1), so log_prob = max1 -
+                # log_sum_exp without re-loading token_logit from memory.
+                sum_exp = 0.0
+                for v_start in range(0, vocab_size, BLOCK_V):
+                    v_offs = v_start + tl.arange(0, BLOCK_V)
+                    v_mask = v_offs < vocab_size
+                    logits_block = tl.load(
+                        base_ptr + v_offs, mask=v_mask, other=-1e9
+                    )
+                    sum_exp += tl.sum(tl.exp(logits_block - max1), axis=0)
+                log_sum_exp = tl.log(sum_exp) + max1
+                log_prob = max1 - log_sum_exp
+
+                tl.store(output_tokens_ptr + seq_id * K + k, token)
+                tl.store(output_scores_ptr + seq_id * K + k, log_prob)
+
         if masked:
             tl.store(output_tokens_ptr + seq_id * K + k, 0)
             tl.store(output_scores_ptr + seq_id * K + k, -1e9)
-            continue
-
-        base_ptr = logits_ptr + seq_id * K * vocab_size + k * vocab_size
-
-        # Pass 1: global max1 and its position (argmax)
-        max1 = -1e9
-        argmax = 0
-        for v_start in range(0, vocab_size, BLOCK_V):
-            v_offs = v_start + tl.arange(0, BLOCK_V)
-            v_mask = v_offs < vocab_size
-            logits_block = tl.load(base_ptr + v_offs, mask=v_mask, other=-1e9)
-            block_max = tl.max(logits_block, axis=0)
-            block_argmax = tl.argmax(logits_block, axis=0) + v_start
-            if block_max > max1:
-                max1 = block_max
-                argmax = block_argmax
-
-        # Pass 2: global max2, masking out the argmax position specifically
-        # (not just its block) so co-located top-1/top-2 logits don't collapse
-        # to the same value.
-        max2 = -1e9
-        for v_start in range(0, vocab_size, BLOCK_V):
-            v_offs = v_start + tl.arange(0, BLOCK_V)
-            v_mask = (v_offs < vocab_size) & (v_offs != argmax)
-            logits_block = tl.load(base_ptr + v_offs, mask=v_mask, other=-1e9)
-            block_max = tl.max(logits_block, axis=0)
-            if block_max > max2:
-                max2 = block_max
-
-        confidence = max1 - max2
-        if confidence < confidence_threshold:
-            masked = True
-            tl.store(output_tokens_ptr + seq_id * K + k, 0)
-            tl.store(output_scores_ptr + seq_id * K + k, -1e9)
-            continue
-
-        token = argmax
-
-        # log_prob of the sampled token via numerically-stable log-sum-exp.
-        # token == argmax and max1 == logits[argmax] (pinned together in
-        # pass 1), so log_prob = max1 - log_sum_exp without re-loading
-        # token_logit from global memory.
-        sum_exp = 0.0
-        for v_start in range(0, vocab_size, BLOCK_V):
-            v_offs = v_start + tl.arange(0, BLOCK_V)
-            v_mask = v_offs < vocab_size
-            logits_block = tl.load(base_ptr + v_offs, mask=v_mask, other=-1e9)
-            sum_exp += tl.sum(tl.exp(logits_block - max1), axis=0)
-        log_sum_exp = tl.log(sum_exp) + max1
-        log_prob = max1 - log_sum_exp
-
-        tl.store(output_tokens_ptr + seq_id * K + k, token)
-        tl.store(output_scores_ptr + seq_id * K + k, log_prob)
 
 
 class PEAGLEDraftWorker(EagleDraftWorker):

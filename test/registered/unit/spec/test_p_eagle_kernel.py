@@ -83,11 +83,27 @@ class TestPEagleRegistration(unittest.TestCase):
         reason="sgl_kernel not installed locally; passes in CI",
     )
     def test_peagle_worker_class_resolved(self):
+        from types import SimpleNamespace
+
         from sglang.srt.speculative.p_eagle_worker import PEAGLEDSLWorker, PEAGLEWorker
         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
-        self.assertIs(SpeculativeAlgorithm.PEAGLE.get_worker_cls(), PEAGLEWorker)
-        self.assertIs(SpeculativeAlgorithm.PEAGLE_DSL.get_worker_cls(), PEAGLEDSLWorker)
+        fake_server_args = SimpleNamespace(enable_multi_layer_eagle=False)
+        self.assertIs(
+            SpeculativeAlgorithm.PEAGLE.create_worker(fake_server_args), PEAGLEWorker
+        )
+        self.assertIs(
+            SpeculativeAlgorithm.PEAGLE_DSL.create_worker(fake_server_args),
+            PEAGLEDSLWorker,
+        )
+        # is_eagle() is also True for PEAGLE/PEAGLE_DSL (they share EAGLE-3's
+        # draft-head infra) -- create_worker must resolve the more specific
+        # PEAGLE branch, not silently fall through to plain EAGLEWorkerV2.
+        from sglang.srt.speculative.eagle_worker_v2 import EAGLEWorkerV2
+
+        self.assertIsNot(
+            SpeculativeAlgorithm.PEAGLE.create_worker(fake_server_args), EAGLEWorkerV2
+        )
 
 
 # ---------------------------------------------------------------------------

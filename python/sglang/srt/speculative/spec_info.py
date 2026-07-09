@@ -221,9 +221,25 @@ class SpeculativeAlgorithm(Enum):
 
             return FrozenKVMTPWorkerV2
 
+        # PEAGLE / PEAGLE_DSL must be checked before the generic is_eagle()
+        # branch below -- is_eagle() is True for them too (they share
+        # EAGLE-3's draft-head infrastructure), so if this branch moved
+        # after the generic one it would never be reached and
+        # --speculative-algorithm PEAGLE would silently run plain
+        # EAGLEWorkerV2 instead of P-EAGLE.
+        if self.is_peagle():
+            if self == SpeculativeAlgorithm.PEAGLE_DSL:
+                from sglang.srt.speculative.p_eagle_worker import PEAGLEDSLWorker
+
+                return PEAGLEDSLWorker
+            else:
+                from sglang.srt.speculative.p_eagle_worker import PEAGLEWorker
+
+                return PEAGLEWorker
+
         # EAGLE / EAGLE3 / STANDALONE / MULTI_LAYER always use the V2 worker,
         # even with overlap disabled (scheduler drives it synchronously).
-        if self.is_eagle() and server_args.enable_multi_layer_eagle:
+        elif self.is_eagle() and server_args.enable_multi_layer_eagle:
             from sglang.srt.speculative.multi_layer_eagle_worker_v2 import (
                 MultiLayerEagleWorkerV2,
             )
@@ -244,16 +260,6 @@ class SpeculativeAlgorithm(Enum):
             from sglang.srt.speculative.ngram_worker import NGRAMWorker
 
             return NGRAMWorker
-
-        elif self.is_peagle():
-            if self == SpeculativeAlgorithm.PEAGLE_DSL:
-                from sglang.srt.speculative.p_eagle_worker import PEAGLEDSLWorker
-
-                return PEAGLEDSLWorker
-            else:
-                from sglang.srt.speculative.p_eagle_worker import PEAGLEWorker
-
-                return PEAGLEWorker
 
         raise ValueError("Unreachable code path in create_worker.")
 
