@@ -279,13 +279,22 @@ class PEAGLEDraftWorker(EagleDraftWorker):
         orig_batch_size = forward_batch.batch_size
 
         # input_ids is not read anywhere in the base sequential loop before
-        # it overwrites it fresh each step (eagle_worker_v2.py:671) -- the
-        # framework tolerates it being None on entry to draft_forward, since
-        # hidden_states (replaced with parallel_inputs below) carries the
-        # real per-position input, not input_ids. Mirror that tolerance
-        # instead of assuming a tensor is always present.
-        if orig_input_ids is not None:
-            forward_batch.input_ids = orig_input_ids.repeat_interleave(K, dim=0)
+        # it overwrites it fresh each step (eagle_worker_v2.py:671) -- but it
+        # DOES always write a real (non-None) tensor there before the actual
+        # forward call. eager_runner.py's load_batch derives raw_num_tokens
+        # from input_ids.shape[0], falling back to 0 if input_ids is None;
+        # several registry buffer slots are sized off that token-count axis,
+        # so leaving input_ids as None here (rather than just not reading
+        # its old value) breaks unrelated slot sizing downstream. Build a
+        # real, correctly-shaped placeholder the same way the base loop
+        # effectively does -- content is irrelevant since parallel_inputs
+        # (assigned to hidden_states below) drives the actual computation,
+        # not input_ids.
+        forward_batch.input_ids = (
+            orig_input_ids.repeat_interleave(K, dim=0)
+            if orig_input_ids is not None
+            else last_tokens.repeat_interleave(K, dim=0)
+        )
         forward_batch.req_pool_indices = orig_req_pool_indices.repeat_interleave(
             K, dim=0
         )

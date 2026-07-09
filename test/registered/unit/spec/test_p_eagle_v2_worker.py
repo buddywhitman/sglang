@@ -150,6 +150,38 @@ class TestPEagleV2WorkerDraftForward(CustomTestCase):
         self.assertEqual(draft_tokens.dtype, torch.int64)
         self.assertIsNone(draft_probs)
 
+    def test_input_ids_none_gets_real_placeholder_not_left_none(self):
+        """A live server caught this: input_ids can legitimately be None on
+        entry (the base sequential loop never reads it before overwriting
+        it fresh each step, so the framework tolerates that). But
+        eager_runner.py's load_batch derives raw_num_tokens from
+        input_ids.shape[0], falling back to 0 if it's None -- and several
+        registry buffer slots are sized off that token-count axis. Leaving
+        input_ids as None (rather than building a same-shape placeholder)
+        crashed with "tensor a (0) must match tensor b (4)" on first real
+        request. input_ids must always be a real, correctly-shaped tensor
+        by the time draft_runner.forward() is called, even though its
+        content doesn't drive the actual computation (parallel_inputs does)."""
+        bs, K, hidden_dim, vocab_size = 2, 3, 16, 64
+        worker = _make_worker(num_steps=K, hidden_dim=hidden_dim, vocab_size=vocab_size)
+        forward_batch = _make_forward_batch(worker, bs, hidden_dim, vocab_size)
+        forward_batch.input_ids = None
+
+        captured = {}
+
+        def fake_forward(fb, skip_attn_backend_init=False):
+            captured["input_ids"] = fb.input_ids
+            logits = torch.randn(fb.input_ids.shape[0], vocab_size, device=DEVICE)
+            return SimpleNamespace(logits_output=SimpleNamespace(next_token_logits=logits))
+
+        worker.draft_runner = SimpleNamespace(forward=fake_forward)
+        worker.draft_forward(forward_batch)
+
+        self.assertIsNotNone(captured["input_ids"])
+        self.assertEqual(captured["input_ids"].shape[0], bs * K)
+        # Restored to None afterward, matching the pre-call state.
+        self.assertIsNone(forward_batch.input_ids)
+
     def test_forward_batch_restored_after_call(self):
         """draft_forward mutates forward_batch in place to K-expand it for
         the single batched call -- it must restore the original
