@@ -87,9 +87,23 @@ def _make_worker(
     # class lookup by monkeypatching the bound method target directly.
     type(worker)._embed_table = property(lambda self: self._embed_table_override)
 
-    worker.draft_attn_backend = SimpleNamespace(attn_backends=[SimpleNamespace()])
+    worker.draft_attn_backend = SimpleNamespace(
+        attn_backends=[SimpleNamespace()],
+        init_forward_metadata=lambda fb: None,
+    )
 
     return worker
+
+
+def _mark_forward_metadata_ready(forward_batch, replan_equivalent=False):
+    forward_batch.forward_metadata_ready = True
+    forward_batch.forward_metadata_planned_bs = forward_batch.batch_size
+    forward_batch.forward_metadata_planned_num_tokens = (
+        forward_batch.input_ids.shape[0]
+        if forward_batch.input_ids is not None
+        else 0
+    )
+    forward_batch.forward_metadata_replan_equivalent = replan_equivalent
 
 
 def _make_forward_batch(worker, bs: int, hidden_dim: int, vocab_size: int, seed=0):
@@ -111,9 +125,18 @@ def _make_forward_batch(worker, bs: int, hidden_dim: int, vocab_size: int, seed=
         req_pool_indices=torch.arange(bs, device=DEVICE, dtype=torch.int64),
         seq_lens=torch.full((bs,), 10, device=DEVICE, dtype=torch.int64),
         positions=torch.full((bs,), 10, device=DEVICE, dtype=torch.int64),
+        forward_metadata_ready=False,
+        forward_metadata_planned_bs=None,
+        forward_metadata_planned_num_tokens=None,
+        forward_metadata_replan_equivalent=False,
         out_cache_loc=torch.arange(
             bs * worker.speculative_num_steps, device=DEVICE, dtype=torch.int64
         ),
+    )
+    forward_batch.mark_forward_metadata_ready = (
+        lambda replan_equivalent=False: _mark_forward_metadata_ready(
+            forward_batch, replan_equivalent
+        )
     )
     return forward_batch
 

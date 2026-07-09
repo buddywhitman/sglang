@@ -312,13 +312,32 @@ class PEAGLEDraftWorker(EagleDraftWorker):
         # against a live server.
         forward_batch.batch_size = batch_size * K
 
+        # The caller (draft()) already pre-planned + marked attention
+        # metadata ready for the *original* (unexpanded) batch shape.
+        # skip_attn_backend_init=True would trust that stale plan for our
+        # batch*K shape instead of re-planning -- caught live with
+        # flashinfer rejecting the mismatched Q tensor ("q.shape[0] (4)
+        # does not match batch_size * q_len_per_req (1 * 1 = 1)"). The base
+        # sequential loop never hits this because its per-step batch_size
+        # never changes, only the content does. Force a fresh plan for the
+        # expanded shape instead of reusing the stale one.
+        orig_metadata_ready = forward_batch.forward_metadata_ready
+        orig_metadata_planned_bs = forward_batch.forward_metadata_planned_bs
+        orig_metadata_planned_num_tokens = (
+            forward_batch.forward_metadata_planned_num_tokens
+        )
+        orig_metadata_replan_equivalent = (
+            forward_batch.forward_metadata_replan_equivalent
+        )
+        forward_batch.forward_metadata_ready = False
+        self.draft_attn_backend.init_forward_metadata(forward_batch)
+        forward_batch.mark_forward_metadata_ready()
+
         try:
             with forward_context(
                 ForwardContext(attn_backend=self.draft_attn_backend.attn_backends[0])
             ):
-                logits_output = self.draft_runner.forward(
-                    forward_batch, skip_attn_backend_init=True
-                ).logits_output
+                logits_output = self.draft_runner.forward(forward_batch).logits_output
         finally:
             forward_batch.input_ids = orig_input_ids
             forward_batch.req_pool_indices = orig_req_pool_indices
@@ -326,6 +345,14 @@ class PEAGLEDraftWorker(EagleDraftWorker):
             forward_batch.positions = orig_positions
             spec_info.hidden_states = orig_hidden_states
             forward_batch.batch_size = orig_batch_size
+            forward_batch.forward_metadata_ready = orig_metadata_ready
+            forward_batch.forward_metadata_planned_bs = orig_metadata_planned_bs
+            forward_batch.forward_metadata_planned_num_tokens = (
+                orig_metadata_planned_num_tokens
+            )
+            forward_batch.forward_metadata_replan_equivalent = (
+                orig_metadata_replan_equivalent
+            )
 
         all_logits = logits_output.next_token_logits.view(batch_size, K, -1)
 
