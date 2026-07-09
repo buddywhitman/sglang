@@ -106,6 +106,7 @@ def _make_forward_batch(worker, bs: int, hidden_dim: int, vocab_size: int, seed=
     forward_batch = SimpleNamespace(
         forward_mode=ForwardMode.DECODE,
         spec_info=spec_info,
+        batch_size=bs,
         input_ids=torch.randint(0, vocab_size, (bs,), device=DEVICE, dtype=torch.int64),
         req_pool_indices=torch.arange(bs, device=DEVICE, dtype=torch.int64),
         seq_lens=torch.full((bs,), 10, device=DEVICE, dtype=torch.int64),
@@ -165,13 +166,22 @@ class TestPEagleV2WorkerDraftForward(CustomTestCase):
         orig_positions = forward_batch.positions.clone()
         orig_hidden_states = forward_batch.spec_info.hidden_states.clone()
 
+        captured_batch_size_during_call = {}
+
         def fake_forward(fb, skip_attn_backend_init=False):
+            captured_batch_size_during_call["value"] = fb.batch_size
             logits = torch.randn(fb.input_ids.shape[0], vocab_size, device=DEVICE)
             return SimpleNamespace(logits_output=SimpleNamespace(next_token_logits=logits))
 
         worker.draft_runner = SimpleNamespace(forward=fake_forward)
         worker.draft_forward(forward_batch)
 
+        # batch_size is a separate field from the tensor shapes -- the eager
+        # runner's buffer registry reads it directly (not input_ids.shape[0])
+        # to size its copy buffers, so it must be expanded during the call
+        # and restored after, same as the tensors.
+        self.assertEqual(captured_batch_size_during_call["value"], bs * K)
+        self.assertEqual(forward_batch.batch_size, bs)
         self.assertEqual(forward_batch.input_ids.shape[0], bs)
         self.assertTrue(torch.equal(forward_batch.input_ids, orig_input_ids))
         self.assertTrue(

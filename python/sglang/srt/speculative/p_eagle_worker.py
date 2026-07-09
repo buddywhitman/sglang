@@ -276,6 +276,7 @@ class PEAGLEDraftWorker(EagleDraftWorker):
         orig_seq_lens = forward_batch.seq_lens
         orig_positions = forward_batch.positions
         orig_hidden_states = spec_info.hidden_states
+        orig_batch_size = forward_batch.batch_size
 
         # input_ids is not read anywhere in the base sequential loop before
         # it overwrites it fresh each step (eagle_worker_v2.py:671) -- the
@@ -294,6 +295,13 @@ class PEAGLEDraftWorker(EagleDraftWorker):
         # by prepare_for_draft (topk=1 here, so that's exactly [bs * K]) --
         # reused as-is, not touched.
         spec_info.hidden_states = parallel_inputs
+        # batch_size is a separate field from the tensor shapes -- the eager
+        # runner's buffer registry (cuda_graph_buffer_registry.py) reads it
+        # directly to size/locate its copy buffers, independent of
+        # input_ids.shape[0]. Leaving it stale caused a real crash here
+        # ("tensor a (0) must match tensor b (4)") the first time this ran
+        # against a live server.
+        forward_batch.batch_size = batch_size * K
 
         try:
             with forward_context(
@@ -308,6 +316,7 @@ class PEAGLEDraftWorker(EagleDraftWorker):
             forward_batch.seq_lens = orig_seq_lens
             forward_batch.positions = orig_positions
             spec_info.hidden_states = orig_hidden_states
+            forward_batch.batch_size = orig_batch_size
 
         all_logits = logits_output.next_token_logits.view(batch_size, K, -1)
 
