@@ -199,6 +199,29 @@ class PEAGLEDraftWorker(EagleDraftWorker):
                 "probabilities (it always greedy-samples). Do not pass "
                 "--speculative-use-rejection-sampling with PEAGLE/PEAGLE_DSL."
             )
+        # draft_forward dynamically expands forward_batch to batch*K via fresh
+        # tensor allocations (repeat_interleave, fused_parallel_draft_input).
+        # Under CUDA graph capture (EagleDraftCudaGraphRunner), draft_forward
+        # only ever runs once, inside capture_one_shape's run_once() -- the
+        # K-expansion is baked into the captured kernels' one-time allocation
+        # addresses. Every real request then goes through execute(), which
+        # refreshes only the unexpanded buffers.hidden_states[:raw_bs] (and
+        # friends) with real per-request data -- the captured graph's kernels
+        # never read from those buffers for the K-expanded computation, so
+        # replay silently uses stale capture-time data instead of the real
+        # request. This is a structural memory-safety bug (the most likely
+        # cause of the FlashInfer BatchDecodeWithPagedKVCache
+        # illegal-memory-access crash in verify()), not merely an unverified
+        # path -- fail loudly until this class gets its own
+        # capture_one_shape/execute overrides that redo the K-expansion at
+        # replay time.
+        if not self.server_args.disable_cuda_graph:
+            raise ValueError(
+                "PEAGLE/PEAGLE_DSL do not yet support CUDA graph capture "
+                "(pass --disable-cuda-graph). See the comment above this check "
+                "for why: draft_forward's batch*K expansion only runs once, at "
+                "capture time, and is never refreshed with real data on replay."
+            )
 
         self.enable_dsl = enable_dsl
         self.dsl_threshold = dsl_threshold

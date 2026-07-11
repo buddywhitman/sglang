@@ -344,6 +344,27 @@ class TestPEagleV2WorkerDraftForward(CustomTestCase):
             with self.assertRaisesRegex(ValueError, "rejection"):
                 PEAGLEDraftWorker(enable_dsl=False)
 
+    def test_rejects_cuda_graph_enabled(self):
+        # draft_forward's batch*K expansion only runs once, at capture time,
+        # inside EagleDraftCudaGraphRunner.capture_one_shape -- real requests
+        # then replay through execute(), which never re-runs the expansion
+        # and only refreshes the unexpanded buffers.hidden_states[:raw_bs].
+        # CUDA graphs must be disabled until this class gets its own
+        # capture_one_shape/execute overrides.
+        def fake_super_init(self, *args, **kwargs):
+            self.topk = 1
+            self.server_args = _fake_server_args(
+                speculative_use_rejection_sampling=False,
+                disable_cuda_graph=False,
+            )
+
+        with unittest.mock.patch(
+            "sglang.srt.speculative.eagle_worker_v2.EagleDraftWorker.__init__",
+            fake_super_init,
+        ):
+            with self.assertRaisesRegex(ValueError, "CUDA graph"):
+                PEAGLEDraftWorker(enable_dsl=False)
+
 
 if __name__ == "__main__":
     unittest.main()
